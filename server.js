@@ -18,15 +18,32 @@ app.post("/ask", async (req, res) => {
   try {
     const question = req.body.question;
 
-    if (!question) {
-      return res.status(400).json({ error: "Missing 'question' field" });
+    // בדיקה 1: יש שאלה?
+    if (!question || typeof question !== 'string' || !question.trim()) {
+      return res.status(400).json({ 
+        success: false,
+        error: "Missing or invalid 'question' field" 
+      });
     }
 
+    // בדיקה 2: יש API key?
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      console.error("GROQ_API_KEY is not defined");
+      return res.status(500).json({ 
+        success: false,
+        error: "API key not configured" 
+      });
+    }
+
+    console.log("Calling Groq API with question:", question.substring(0, 100));
+
+    // קריאה ל-Groq
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+        "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
@@ -135,20 +152,49 @@ SEO – חובה בכל אתר:
       })
     });
 
-    const data = await response.json();
-
-    if (!data.choices || !data.choices[0]) {
-      console.error("API ERROR:", data);
-      return res.status(500).json({ error: "API error", details: data });
+    // בדיקה 3: התגובה תקינה?
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Groq API error:", response.status, errorText);
+      return res.status(response.status).json({ 
+        success: false,
+        error: `API error: ${response.status}`,
+        details: errorText
+      });
     }
 
-    res.json({ answer: data.choices[0].message.content });
+    const data = await response.json();
+
+    // בדיקה 4: יש תוכן בתגובה?
+    if (!data.choices || !data.choices[0] || !data.choices[0].message || !data.choices[0].message.content) {
+      console.error("Invalid API response:", data);
+      return res.status(500).json({ 
+        success: false,
+        error: "Invalid API response structure",
+        details: data
+      });
+    }
+
+    console.log("Success! Response length:", data.choices[0].message.content.length);
+
+    // החזרת תשובה מוצלחת
+    res.json({ 
+      success: true,
+      answer: data.choices[0].message.content 
+    });
 
   } catch (err) {
-    console.error("ERROR:", err.message);
-    res.status(500).json({ error: "Server error", details: err.message });
+    console.error("FATAL ERROR:", err.message, err.stack);
+    res.status(500).json({ 
+      success: false,
+      error: "Server error", 
+      details: err.message 
+    });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ GROQ_API_KEY: ${process.env.GROQ_API_KEY ? "SET" : "NOT SET"}`);
+});
