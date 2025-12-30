@@ -13,13 +13,21 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 const sessions = new Map();
 const MAX_SESSION_SIZE = 100;
 
+// Queue system for rate limiting
+const requestQueue = [];
+let isProcessingQueue = false;
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 2000; // 2 seconds between requests
+
 // Analytics storage
 const analytics = {
   totalRequests: 0,
   successfulBuilds: 0,
   failedBuilds: 0,
   averageResponseTime: 0,
-  popularRequests: []
+  popularRequests: [],
+  rateLimitHits: 0,
+  queuedRequests: 0
 };
 
 // Helper: Clean session history
@@ -89,6 +97,35 @@ function generateSuggestions(intent, currentHtml) {
   return [];
 }
 
+// Helper: Process queue with rate limiting
+async function processQueue() {
+  if (isProcessingQueue || requestQueue.length === 0) return;
+  
+  isProcessingQueue = true;
+  
+  while (requestQueue.length > 0) {
+    const now = Date.now();
+    const timeSinceLastRequest = now - lastRequestTime;
+    
+    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+      await new Promise(resolve => setTimeout(resolve, MIN_REQUEST_INTERVAL - timeSinceLastRequest));
+    }
+    
+    const { req, res, resolve: resolveRequest } = requestQueue.shift();
+    lastRequestTime = Date.now();
+    
+    try {
+      await handleAIRequest(req, res);
+      resolveRequest();
+    } catch (error) {
+      res.json({ success: false, error: error.message, userMessage: '❌ שגיאה בעיבוד הבקשה' });
+      resolveRequest();
+    }
+  }
+  
+  isProcessingQueue = false;
+}
+
 // Root endpoint
 app.get("/", (req, res) => {
   res.json({ 
@@ -108,26 +145,39 @@ app.get("/analytics", (req, res) => {
   res.json({
     ...analytics,
     activeSessions: sessions.size,
+    queueLength: requestQueue.length,
+    isProcessing: isProcessingQueue,
     timestamp: new Date().toISOString()
   });
 });
 
-// Main AI endpoint
+// Main AI endpoint with queue
 app.post("/ask", async (req, res) => {
-  const startTime = Date.now();
   analytics.totalRequests++;
+  analytics.queuedRequests++;
+  
+  // Add to queue
+  await new Promise((resolve) => {
+    requestQueue.push({ req, res, resolve });
+    processQueue();
+  });
+});
+
+// Actual AI request handler
+async function handleAIRequest(req, res) {
+  const startTime = Date.now();
   
   try {
     const { question, history = [], currentHtml = null, sessionId = 'default' } = req.body;
 
     if (!question || !question.trim()) {
-      return res.status(400).json({ success: false, error: "חסרה שאלה" });
+      return res.json({ success: false, error: "חסרה שאלה" });
     }
 
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
       analytics.failedBuilds++;
-      return res.status(500).json({ success: false, error: "API key לא מוגדר" });
+      return res.json({ success: false, error: "API key לא מוגדר" });
     }
 
     // Detect intent
@@ -144,64 +194,85 @@ app.post("/ask", async (req, res) => {
     const messages = [
       {
         role: "system",
-        content: `אתה DDreams AI Ultra - בוט בניית אתרים מתקדם ומקצועי עם אישיות חמה.
+        content: `אתה מפתח אתרים מקצועי ברמה עולמית. תפקידך לבנות אתרי HTML מלאים ומושקעים.
 
-🎯 **אישיות:**
-- דובר עברית חמה, חברותית וסבלנית
-- מסביר בבהירות מה אתה עושה
-- שואל שאלות כשצריך הבהרות
-- מציע רעיונות יצירתיים
-- מחמיא למשתמש על בחירות טובות
+⚠️ חוקים קריטיים - חובה לעמוד בהם:
 
-🛠️ **יכולות:**
-1. **בניית אתרים חדשים** - HTML מלא עם Tailwind CSS
-2. **עריכת אתרים קיימים** - שינויים מדויקים
-3. **ייעוץ ועזרה** - מענה על שאלות טכניות
-4. **הצעות שיפור** - ריקומנדציות אוטומטיות
+1. **תמונות חובה:**
+   - כל תמונה חייבת להיות מ-https://images.unsplash.com/
+   - דוגמאות תקינות:
+     * https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=800
+     * https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=1200
+     * https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=600
+   - השתמש במילות חיפוש מדויקות ב-URL
+   - לפחות 10 תמונות באתר
 
-📋 **כללי קוד:**
-- תמיד החזר HTML מלא עם <!DOCTYPE html>
-- הכלל: <script src="https://cdn.tailwindcss.com"></script>
-- הכלל: <link rel="stylesheet" href__="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-- הכלל: <link href__="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700&display=swap" rel="stylesheet">
-- הכלל: <link href__="https://cdnjs.cloudflare.com/ajax/libs/aos/2.3.4/aos.css" rel="stylesheet">
-- dir="rtl" lang="he"
-- תמונות רק מ-https://images.unsplash.com/
-- מינימום 1000 שורות קוד
+2. **קוד מינימלי:**
+   - מינימום 1500 שורות HTML מלא
+   - כלול את כל הספריות הנדרשות
+   - HTML מושלם עם סגירת תגיות
 
-🎨 **מבנה חובה:**
-- ניווט עליון sticky עם לוגו
-- Hero מרשים בגובה מלא
-- אודות עם תמונות
-- שירותים (6+ כרטיסים עם אייקונים)
-- גלריה (8+ תמונות)
-- המלצות לקוחות
-- טופס יצירת קשר
-- פוטר עשיר
-- כפתור WhatsApp צף: <a href__="https://wa.me/972501234567" class="fixed bottom-6 left-6 bg-green-500 text-white w-14 h-14 rounded-full flex items-center justify-center shadow-lg hover:bg-green-600 transition z-50"><i class="fab fa-whatsapp text-2xl"></i></a>
-- כפתור גלילה למעלה: <button onclick="window.scrollTo({top:0,behavior:'smooth'})" class="fixed bottom-6 right-6 bg-blue-600 text-white w-12 h-12 rounded-full flex items-center justify-center shadow-lg hover:bg-blue-700 transition z-50"><i class="fas fa-arrow-up"></i></button>
+3. **עיצוב מושקע:**
+   - Tailwind CSS מתקדם
+   - Gradients: bg-gradient-to-r from-blue-600 to-indigo-700
+   - Shadows: shadow-2xl, shadow-lg
+   - Hover effects על כל אלמנט
+   - אנימציות: data-aos="fade-up"
 
-💬 **תקשורת:**
-- אם בונה/משנה אתר - החזר רק HTML
-- אם צריך הבהרה - שאל שאלה בעברית
-- אם משתמש מתלונן - התנצל ושפר
-- אם משתמש מרוצה - המשך להוסיף ערך
+4. **מבנה חובה:**
+   - <nav> sticky עם לוגו ותפריט
+   - <section id="hero"> בגובה מלא עם תמונת רקע
+   - <section id="about"> עם תמונות וטקסט
+   - <section id="services"> עם 6+ כרטיסים
+   - <section id="gallery"> עם 8+ תמונות
+   - <section id="testimonials"> עם 3+ המלצות
+   - <section id="contact"> עם טופס מלא
+   - <footer> עשיר עם קישורים
+   - כפתורי WhatsApp וגלילה למעלה
 
-🔥 **קסם נוסף:**
-- הוסף אנימציות AOS
-- השתמש ב-gradients יפים
-- הוסף hover effects
-- כלול JavaScript לאינטראקטיביות
-- וודא responsive מלא
+5. **ספריות חובה בראש:**
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>אתר מקצועי</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href__="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href__="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+  <link href__="https://cdnjs.cloudflare.com/ajax/libs/aos/2.3.4/aos.css" rel="stylesheet">
+  <style>
+    * { font-family: 'Heebo', sans-serif; }
+  </style>
+</head>
 
-📝 **פורמט תשובה:**
-כשבונה אתר - החזר רק:
+6. **JavaScript חובה לפני סגירת body:**
+<script src="https://cdnjs.cloudflare.com/ajax/libs/aos/2.3.4/aos.js"></script>
+<script>
+  AOS.init({ duration: 1000, once: true });
+</script>
+
+7. **תוכן עברי איכותי:**
+   - כתוב תוכן מקצועי בעברית
+   - לא "לורם איפסום"
+   - תוכן רלוונטי לנושא
+
+8. **אלמנטים צפים:**
+   - WhatsApp: <a href__="https://wa.me/972501234567" class="fixed bottom-6 left-6 bg-green-500 hover:bg-green-600 text-white w-14 h-14 rounded-full flex items-center justify-center shadow-2xl z-50 transition"><i class="fab fa-whatsapp text-2xl"></i></a>
+   - גלילה למעלה: <button onclick="window.scrollTo({top:0,behavior:'smooth'})" class="fixed bottom-6 right-6 bg-blue-600 hover:bg-blue-700 text-white w-12 h-12 rounded-full flex items-center justify-center shadow-2xl z-50 transition"><i class="fas fa-arrow-up"></i></button>
+
+⛔ אסור:
+- להחזיר קוד חלקי
+- להשתמש בתמונות placeholder
+- לכתוב markdown
+- לתת הסברים
+- לדלג על ספריות
+
+✅ החזר רק:
 <!DOCTYPE html>
 <html dir="rtl" lang="he">
-...קוד מלא...
+...1500+ שורות קוד מלא...
 </html>
 
-אל תשתמש ב-markdown, אל תסביר - רק קוד!`
+אם מבקשים שינוי - שנה רק את המבוקש ושמור על כל השאר!`
       }
     ];
 
@@ -210,7 +281,7 @@ app.post("/ask", async (req, res) => {
     cleanedHistory.forEach(msg => {
       messages.push({
         role: msg.role === 'user' ? 'user' : 'assistant',
-        content: msg.content.substring(0, 2000) // Limit message size
+        content: msg.content.substring(0, 2000)
       });
     });
 
@@ -226,31 +297,57 @@ app.post("/ask", async (req, res) => {
 
     messages.push({ role: "user", content: userPrompt });
 
-    // Call Groq API
+    // Call Groq API with retry logic
     console.log(`🤖 Calling Groq API... (${messages.length} messages)`);
     
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages,
-        temperature: intent === 'MODIFY' ? 0.3 : 0.4,
-        max_tokens: 8000
-      })
-    });
+    let response;
+    let retries = 0;
+    const maxRetries = 3;
+    
+    while (retries < maxRetries) {
+      try {
+        response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model: "llama-3.3-70b-versatile",
+            messages,
+            temperature: intent === 'MODIFY' ? 0.3 : 0.4,
+            max_tokens: 8000
+          })
+        });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`❌ Groq error: ${response.status}`);
-      analytics.failedBuilds++;
-      return res.status(response.status).json({ 
-        success: false, 
-        error: `שגיאת API: ${response.status}` 
-      });
+        if (response.status === 429) {
+          analytics.rateLimitHits++;
+          retries++;
+          const waitTime = Math.pow(2, retries) * 1000;
+          console.log(`⏳ Rate limited, waiting ${waitTime}ms before retry ${retries}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`❌ Groq error: ${response.status}`);
+          analytics.failedBuilds++;
+          return res.json({ 
+            success: false, 
+            error: `שגיאת API: ${response.status}`,
+            userMessage: response.status === 429 
+              ? '⏳ השרת עמוס, נסה שוב בעוד כמה שניות'
+              : 'שגיאה בתקשורת עם השרת'
+          });
+        }
+
+        break;
+      } catch (error) {
+        retries++;
+        if (retries >= maxRetries) throw error;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
     }
 
     const data = await response.json();
@@ -258,7 +355,7 @@ app.post("/ask", async (req, res) => {
 
     if (!answer) {
       analytics.failedBuilds++;
-      return res.status(500).json({ success: false, error: "אין תשובה מה-AI" });
+      return res.json({ success: false, error: "אין תשובה מה-AI" });
     }
 
     // Extract and validate HTML if building
@@ -266,7 +363,6 @@ app.post("/ask", async (req, res) => {
     if (intent === 'CREATE' || intent === 'MODIFY') {
       extractedHtml = extractHTML(answer);
       
-      // Ensure essential CDNs
       if (extractedHtml) {
         if (!extractedHtml.includes('tailwindcss')) {
           extractedHtml = extractedHtml.replace('</head>', '  <script src="https://cdn.tailwindcss.com"></script>\n</head>');
@@ -303,20 +399,22 @@ app.post("/ask", async (req, res) => {
         responseTime: responseTime + 'ms',
         hasHtml: !!extractedHtml,
         suggestions,
-        sessionId
+        sessionId,
+        queuePosition: requestQueue.length
       }
     });
 
   } catch (err) {
     analytics.failedBuilds++;
     console.error("💥 FATAL ERROR:", err.message);
-    res.status(500).json({ 
+    res.json({ 
       success: false, 
       error: "שגיאת שרת פנימית", 
-      details: err.message 
+      details: err.message,
+      userMessage: '❌ אופס! משהו השתבש. נסה שוב בעוד רגע'
     });
   }
-});
+}
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -337,7 +435,7 @@ app.post("/clear-session", (req, res) => {
 // Cleanup old sessions every hour
 setInterval(() => {
   const now = Date.now();
-  const MAX_AGE = 3600000; // 1 hour
+  const MAX_AGE = 3600000;
   
   for (const [id, session] of sessions.entries()) {
     if (now - session.createdAt > MAX_AGE) {
@@ -362,6 +460,8 @@ app.listen(PORT, () => {
 ║    ✅ Analytics Tracking             ║
 ║    ✅ HTML Validation                ║
 ║    ✅ Context Awareness              ║
+║    ✅ Rate Limit Protection          ║
+║    ✅ Queue System                   ║
 ╚═══════════════════════════════════════╝
   `);
 });
