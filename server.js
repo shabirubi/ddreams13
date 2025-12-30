@@ -3,6 +3,8 @@ import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
+
+// נתיב בריאות ל‑Render
 app.get("/", (req, res) => {
   res.send("OK");
 });
@@ -34,4 +36,5 @@ app.post("/ask", async (req, res) => {
 });
 
 app.listen(3000, () => console.log("Server running on port 3000"));
+
 
