@@ -3,9 +3,9 @@ import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // 👈 חשוב!
+app.use(express.urlencoded({ extended: true }));
 
-// נתיב בדיקה ל‑Render
+// Render health check
 app.get("/", (req, res) => {
   res.send("OK");
 });
@@ -21,7 +21,7 @@ app.post("/ask", async (req, res) => {
         "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: "llama3-8b-8192",
+        model: "llama3-8b",
         messages: [
           { role: "user", content: question }
         ]
