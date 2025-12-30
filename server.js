@@ -3,6 +3,7 @@ import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // 👈 חשוב!
 
 // נתיב בדיקה ל‑Render
 app.get("/", (req, res) => {
@@ -29,7 +30,6 @@ app.post("/ask", async (req, res) => {
 
     const data = await response.json();
 
-    // אם Groq מחזיר שגיאה — נציג אותה
     if (!data.choices || !data.choices[0]) {
       return res.status(500).json({
         error: "Groq API error",
@@ -45,5 +45,3 @@ app.post("/ask", async (req, res) => {
 });
 
 app.listen(3000, () => console.log("Server running on port 3000"));
-
-
