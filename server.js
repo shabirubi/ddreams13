@@ -4,7 +4,7 @@ const cors = require("cors");
 
 const app = express();
 
-// מאפשר לפרונט לדבר עם השרת
+// מאפשר לפרונט לגשת לשרת
 app.use(cors());
 
 // מאפשר לקבל JSON
