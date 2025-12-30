@@ -21,7 +21,7 @@ app.post("/ask", async (req, res) => {
         "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: "llama-3.1-70b-versatile",
+        model: "llama-3.3-70b-versatile",
         messages: [
           { role: "user", content: question }
         ]
@@ -47,3 +47,4 @@ app.post("/ask", async (req, res) => {
 });
 
 app.listen(3000, () => console.log("Server running on port 3000"));
+
