@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Render health check
+// Health check
 app.get("/", (req, res) => {
   res.send("OK");
 });
@@ -31,6 +31,7 @@ app.post("/ask", async (req, res) => {
     const data = await response.json();
 
     if (!data.choices || !data.choices[0]) {
+      console.error("GROQ API ERROR:", data);
       return res.status(500).json({
         error: "Groq API error",
         details: data
@@ -40,6 +41,7 @@ app.post("/ask", async (req, res) => {
     res.json({ answer: data.choices[0].message.content });
 
   } catch (err) {
+    console.error("SERVER ERROR:", err);
     res.status(500).json({ error: "Server error", details: err.message });
   }
 });
