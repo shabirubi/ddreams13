@@ -4,10 +4,7 @@ const cors = require("cors");
 
 const app = express();
 
-// מאפשר לפרונט לגשת לשרת
 app.use(cors());
-
-// מאפשר לקבל JSON
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -33,8 +30,17 @@ app.post("/ask", async (req, res) => {
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
+
+        // ⭐ כאן אתה יכול לשפר את איכות התשובות
         messages: [
-          { role: "user", content: question }
+          {
+            role: "system",
+            content: "אתה עוזר חכם, ברור, מנומס, ועונה בעברית בצורה מקצועית."
+          },
+          {
+            role: "user",
+            content: question
+          }
         ]
       })
     });
