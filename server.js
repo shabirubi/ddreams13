@@ -4,7 +4,7 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-// נתיב בריאות ל‑Render
+// נתיב בדיקה ל‑Render
 app.get("/", (req, res) => {
   res.send("OK");
 });
@@ -20,7 +20,7 @@ app.post("/ask", async (req, res) => {
         "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: "mixtral-8x7b-32768",
+        model: "llama3-8b-8192",
         messages: [
           { role: "user", content: question }
         ]
@@ -28,6 +28,15 @@ app.post("/ask", async (req, res) => {
     });
 
     const data = await response.json();
+
+    // אם Groq מחזיר שגיאה — נציג אותה
+    if (!data.choices || !data.choices[0]) {
+      return res.status(500).json({
+        error: "Groq API error",
+        details: data
+      });
+    }
+
     res.json({ answer: data.choices[0].message.content });
 
   } catch (err) {
