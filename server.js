@@ -21,7 +21,7 @@ app.post("/ask", async (req, res) => {
         "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: "llama3-8b",
+        model: "mixtral-8x7b-32768",
         messages: [
           { role: "user", content: question }
         ]
