@@ -4,306 +4,397 @@ const cors = require("cors");
 
 const app = express();
 
-// Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Session storage (in-memory for demo, use Redis for production)
-const sessions = new Map();
-const MAX_SESSION_SIZE = 100;
-
-// Queue system for rate limiting
-const requestQueue = [];
-let isProcessingQueue = false;
+// Advanced rate limiter
 let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 2000; // 2 seconds between requests
+const MIN_REQUEST_INTERVAL = 2000;
+const requestStats = { total: 0, successful: 0, failed: 0, rateLimited: 0 };
 
-// Analytics storage
-const analytics = {
-  totalRequests: 0,
-  successfulBuilds: 0,
-  failedBuilds: 0,
-  averageResponseTime: 0,
-  popularRequests: [],
-  rateLimitHits: 0,
-  queuedRequests: 0
-};
-
-// Helper: Clean session history
-function cleanHistory(history, maxMessages = 10) {
-  if (history.length <= maxMessages) return history;
-  return history.slice(-maxMessages);
-}
-
-// Helper: Extract HTML from various formats
-function extractHTML(text) {
-  // Try project format
-  const projectMatch = text.match(/===\s*file:\s*index\.html\s*===\s*([\s\S]*?)(?:===\s*project\s*end|$)/i);
-  if (projectMatch) return projectMatch[1].trim();
-  
-  // Try markdown
-  const markdownMatch = text.match(/```html\s*([\s\S]*?)```/i) || text.match(/```\s*(<!DOCTYPE[\s\S]*?<\/html>)\s*```/i);
-  if (markdownMatch) return markdownMatch[1].trim();
-  
-  // Try direct HTML
-  const htmlMatch = text.match(/<!DOCTYPE[\s\S]*<\/html>/i);
-  if (htmlMatch) return htmlMatch[0].trim();
-  
-  return null;
-}
-
-// Helper: Detect user intent
-function detectIntent(question, hasCurrentHtml) {
-  const lower = question.toLowerCase();
-  
-  if (!hasCurrentHtml) return 'CREATE';
-  
-  const modificationKeywords = [
-    'שנה', 'עדכן', 'הוסף', 'הסר', 'מחק', 'הזז', 'הקטן', 'הגדל',
-    'שפר', 'תקן', 'צבע', 'גופן', 'רקע', 'תמונה'
-  ];
-  
-  if (modificationKeywords.some(kw => lower.includes(kw))) {
-    return 'MODIFY';
-  }
-  
-  const questionKeywords = ['מה', 'איך', 'למה', 'האם', 'מתי', 'כמה'];
-  if (questionKeywords.some(kw => lower.includes(kw))) {
-    return 'QUESTION';
-  }
-  
-  return 'CREATE';
-}
-
-// Helper: Generate smart suggestions
-function generateSuggestions(intent, currentHtml) {
-  if (intent === 'CREATE') {
-    return [
-      "💡 רעיון: אוכל להוסיף אנימציות מגניבות",
-      "💡 רעיון: אוכל להוסיף מצב כהה/בהיר",
-      "💡 רעיון: אוכל להוסיף טופס חכם עם וולידציה"
-    ];
-  }
-  
-  if (intent === 'MODIFY' && currentHtml) {
-    const suggestions = [];
-    if (!currentHtml.includes('aos')) suggestions.push("💡 רעיון: להוסיף אנימציות בגלילה?");
-    if (!currentHtml.includes('whatsapp')) suggestions.push("💡 רעיון: להוסיף כפתור WhatsApp?");
-    if (!currentHtml.includes('gradient')) suggestions.push("💡 רעיון: לשפר עם gradients?");
-    return suggestions;
-  }
-  
-  return [];
-}
-
-// Helper: Process queue with rate limiting
-async function processQueue() {
-  if (isProcessingQueue || requestQueue.length === 0) return;
-  
-  isProcessingQueue = true;
-  
-  while (requestQueue.length > 0) {
-    const now = Date.now();
-    const timeSinceLastRequest = now - lastRequestTime;
-    
-    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
-      await new Promise(resolve => setTimeout(resolve, MIN_REQUEST_INTERVAL - timeSinceLastRequest));
-    }
-    
-    const { req, res, resolve: resolveRequest } = requestQueue.shift();
-    lastRequestTime = Date.now();
-    
-    try {
-      await handleAIRequest(req, res);
-      resolveRequest();
-    } catch (error) {
-      res.json({ success: false, error: error.message, userMessage: '❌ שגיאה בעיבוד הבקשה' });
-      resolveRequest();
-    }
-  }
-  
-  isProcessingQueue = false;
-}
-
-// Root endpoint
-app.get("/", (req, res) => {
-  res.json({ 
-    status: "🚀 DDreams AI Server v3.0 ULTRA",
-    uptime: process.uptime(),
-    analytics: {
-      totalRequests: analytics.totalRequests,
-      successRate: analytics.totalRequests > 0 
-        ? ((analytics.successfulBuilds / analytics.totalRequests) * 100).toFixed(2) + '%'
-        : '0%'
-    }
-  });
-});
-
-// Analytics endpoint
-app.get("/analytics", (req, res) => {
-  res.json({
-    ...analytics,
-    activeSessions: sessions.size,
-    queueLength: requestQueue.length,
-    isProcessing: isProcessingQueue,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Main AI endpoint with queue
 app.post("/ask", async (req, res) => {
-  analytics.totalRequests++;
-  analytics.queuedRequests++;
-  
-  // Add to queue
-  await new Promise((resolve) => {
-    requestQueue.push({ req, res, resolve });
-    processQueue();
-  });
-});
-
-// Actual AI request handler
-async function handleAIRequest(req, res) {
-  const startTime = Date.now();
-  
   try {
-    const { question, history = [], currentHtml = null, sessionId = 'default' } = req.body;
+    const { question, history = [], currentHtml = null } = req.body;
+    requestStats.total++;
 
     if (!question || !question.trim()) {
       return res.json({ success: false, error: "חסרה שאלה" });
     }
 
+    // Rate limiting
+    const now = Date.now();
+    const timeSinceLastRequest = now - lastRequestTime;
+    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+      await new Promise(resolve => setTimeout(resolve, MIN_REQUEST_INTERVAL - timeSinceLastRequest));
+    }
+    lastRequestTime = Date.now();
+
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
-      analytics.failedBuilds++;
+      requestStats.failed++;
       return res.json({ success: false, error: "API key לא מוגדר" });
     }
 
-    // Detect intent
-    const intent = detectIntent(question, currentHtml);
-    console.log(`📊 Intent: ${intent} | Question: ${question.substring(0, 50)}...`);
+    // Intent detection
+    const lower = question.toLowerCase();
+    const modificationKeywords = ['שנה', 'עדכן', 'הוסף', 'הסר', 'מחק', 'תקן', 'שפר', 'צבע', 'גופן'];
+    const hasModificationKeywords = modificationKeywords.some(kw => lower.includes(kw));
+    const intent = currentHtml && hasModificationKeywords ? 'MODIFY' : 'CREATE';
 
-    // Get or create session
-    if (!sessions.has(sessionId)) {
-      sessions.set(sessionId, { history: [], createdAt: Date.now() });
-    }
-    const session = sessions.get(sessionId);
-
-    // Build messages with context
     const messages = [
       {
         role: "system",
-        content: `אתה מפתח אתרים מקצועי ברמה עולמית. תפקידך לבנות אתרי HTML מלאים ומושקעים.
+        content: `🔥 אתה DDreams AI Ultra v4.0 - מפתח אתרים מקצועי ברמה עולמית!
 
-⚠️ חוקים קריטיים - חובה לעמוד בהם:
+⚠️ חוקי ברזל - אסור לעבור עליהם בשום תנאי:
 
-1. **תמונות חובה:**
-   - כל תמונה חייבת להיות מ-https://images.unsplash.com/
-   - דוגמאות תקינות:
-     * https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=800
-     * https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=1200
-     * https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=600
-   - השתמש במילות חיפוש מדויקות ב-URL
-   - לפחות 10 תמונות באתר
+1️⃣ תמונות (CRITICAL):
+   ✅ רק מ-https://images.unsplash.com/
+   ✅ לפחות 15 תמונות באתר
+   ✅ URL מלא תקין: https://images.unsplash.com/photo-XXXXXXXXX?w=800
+   ⛔ אסור: placeholder, example, picsum, lorem ipsum
 
-2. **קוד מינימלי:**
-   - מינימום 1500 שורות HTML מלא
-   - כלול את כל הספריות הנדרשות
-   - HTML מושלם עם סגירת תגיות
+2️⃣ אורך קוד (CRITICAL):
+   ✅ מינימום 2000 שורות HTML מלא
+   ✅ קוד מפורט ומושקע
+   ⛔ אסור: קוד קצר, "...", "הוסף עוד"
 
-3. **עיצוב מושקע:**
-   - Tailwind CSS מתקדם
-   - Gradients: bg-gradient-to-r from-blue-600 to-indigo-700
-   - Shadows: shadow-2xl, shadow-lg
-   - Hover effects על כל אלמנט
-   - אנימציות: data-aos="fade-up"
+3️⃣ עיצוב מתקדם (CRITICAL):
+   ✅ Tailwind CSS עם gradients מטורפים
+   ✅ bg-gradient-to-r from-purple-600 via-pink-600 to-red-600
+   ✅ shadow-2xl, backdrop-blur-lg, rounded-3xl
+   ✅ hover:scale-105 transition-all duration-300
+   ✅ אנימציות AOS על כל אלמנט
+   ⛔ אסור: עיצוב בסיסי, צבעים משעממים
 
-4. **מבנה חובה:**
-   - <nav> sticky עם לוגו ותפריט
-   - <section id="hero"> בגובה מלא עם תמונת רקע
-   - <section id="about"> עם תמונות וטקסט
-   - <section id="services"> עם 6+ כרטיסים
-   - <section id="gallery"> עם 8+ תמונות
-   - <section id="testimonials"> עם 3+ המלצות
-   - <section id="contact"> עם טופס מלא
-   - <footer> עשיר עם קישורים
-   - כפתורי WhatsApp וגלילה למעלה
+4️⃣ מבנה מלא (CRITICAL):
+   ✅ <nav> sticky עם לוגו + תפריט נפתח במובייל
+   ✅ <section id="hero"> בגובה מלא + parallax
+   ✅ <section id="about"> עם 4+ תמונות
+   ✅ <section id="services"> עם 8+ כרטיסים מעוצבים
+   ✅ <section id="gallery"> עם 12+ תמונות ב-grid מגניב
+   ✅ <section id="testimonials"> עם 5+ המלצות עם תמונות
+   ✅ <section id="pricing"> עם 3+ חבילות מחיר
+   ✅ <section id="team"> עם חברי צוות (אופציונלי)
+   ✅ <section id="faq"> עם שאלות ותשובות
+   ✅ <section id="contact"> עם טופס מלא + מפה
+   ✅ <footer> עשיר עם לינקים לכל מקום
+   ⛔ אסור: לדלג על סקשנים
 
-5. **ספריות חובה בראש:**
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>אתר מקצועי</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link href__="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700;900&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href__="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-  <link href__="https://cdnjs.cloudflare.com/ajax/libs/aos/2.3.4/aos.css" rel="stylesheet">
-  <style>
-    * { font-family: 'Heebo', sans-serif; }
-  </style>
-</head>
+5️⃣ ספריות חובה ב-<head> (CRITICAL - חייב את כולן!):
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="תיאור מקצועי של האתר">
+<title>כותרת מקצועית</title>
 
-6. **JavaScript חובה לפני סגירת body:**
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- Google Fonts: Heebo + Assistant + Rubik -->
+<link href__="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700;900&family=Assistant:wght@300;400;600;700;800&family=Rubik:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+
+<!-- Font Awesome Pro Icons -->
+<link rel="stylesheet" href__="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+<!-- AOS Animations -->
+<link href__="https://cdnjs.cloudflare.com/ajax/libs/aos/2.3.4/aos.css" rel="stylesheet">
+
+<!-- Swiper Slider -->
+<link rel="stylesheet" href__="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css">
+
+<!-- GLightbox for Gallery -->
+<link rel="stylesheet" href__="https://cdn.jsdelivr.net/npm/glightbox/dist/css/glightbox.min.css">
+
+<!-- Particles.js for Background Effects -->
+<script src="https://cdn.jsdelivr.net/particles.js/2.0.0/particles.min.js"></script>
+
+<!-- CountUp.js for Number Animations -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/countup.js/2.6.2/countUp.umd.min.js"></script>
+
+<!-- Typed.js for Typing Effect -->
+<script src="https://cdn.jsdelivr.net/npm/typed.js@2.0.16/dist/typed.umd.js"></script>
+
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Heebo', 'Assistant', sans-serif; overflow-x: hidden; }
+  html { scroll-behavior: smooth; direction: rtl; }
+  h1, h2, h3, h4, h5, h6 { font-family: 'Rubik', 'Heebo', sans-serif; font-weight: 700; }
+  
+  /* Custom Cursor */
+  body { cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="%236366f1" opacity="0.3"/></svg>') 12 12, auto; }
+  
+  /* Smooth Transitions */
+  * { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+  
+  /* Loading Bar */
+  .loading-bar { position: fixed; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #6366f1, #ec4899, #f59e0b); z-index: 9999; animation: loading 2s ease-in-out infinite; }
+  @keyframes loading { 0%, 100% { transform: translateX(-100%); } 50% { transform: translateX(100%); } }
+</style>
+
+6️⃣ JavaScript חובה לפני </body> (CRITICAL - חייב את כולם!):
+<!-- AOS Animations -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/aos/2.3.4/aos.js"></script>
+
+<!-- Swiper Slider -->
+<script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
+
+<!-- GLightbox -->
+<script src="https://cdn.jsdelivr.net/npm/glightbox/dist/js/glightbox.min.js"></script>
+
+<!-- Vanilla Tilt for 3D Effects -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vanilla-tilt/1.8.1/vanilla-tilt.min.js"></script>
+
 <script>
-  AOS.init({ duration: 1000, once: true });
+  // AOS Init
+  AOS.init({ 
+    duration: 1000, 
+    once: true, 
+    offset: 100,
+    easing: 'ease-in-out'
+  });
+  
+  // Mobile Menu
+  const menuBtn = document.getElementById('menuBtn');
+  const mobileMenu = document.getElementById('mobileMenu');
+  if (menuBtn && mobileMenu) {
+    menuBtn.addEventListener('click', () => {
+      mobileMenu.classList.toggle('hidden');
+      mobileMenu.classList.toggle('animate-slide-down');
+    });
+  }
+  
+  // Smooth Scroll
+  document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+    anchor.addEventListener('click', function(e) {
+      e.preventDefault();
+      const target = document.querySelector(this.getAttribute('href'));
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (mobileMenu) mobileMenu.classList.add('hidden');
+      }
+    });
+  });
+  
+  // GLightbox for Gallery
+  if (typeof GLightbox !== 'undefined') {
+    const lightbox = GLightbox({
+      touchNavigation: true,
+      loop: true,
+      autoplayVideos: true
+    });
+  }
+  
+  // Swiper Slider Init (if exists)
+  if (typeof Swiper !== 'undefined' && document.querySelector('.swiper')) {
+    new Swiper('.swiper', {
+      slidesPerView: 1,
+      spaceBetween: 30,
+      loop: true,
+      autoplay: { delay: 3000, disableOnInteraction: false },
+      pagination: { el: '.swiper-pagination', clickable: true },
+      navigation: { nextEl: '.swiper-button-next', prevEl: '.swiper-button-prev' },
+      breakpoints: {
+        640: { slidesPerView: 2 },
+        1024: { slidesPerView: 3 }
+      }
+    });
+  }
+  
+  // CountUp Numbers
+  if (typeof countUp !== 'undefined') {
+    document.querySelectorAll('[data-countup]').forEach(el => {
+      const target = parseInt(el.getAttribute('data-countup'));
+      const counter = new countUp.CountUp(el, target, { duration: 2.5 });
+      
+      const observer = new IntersectionObserver((entries) => {
+        if (entries[0].isIntersecting) {
+          counter.start();
+          observer.disconnect();
+        }
+      });
+      observer.observe(el);
+    });
+  }
+  
+  // Typed.js Effect
+  if (typeof Typed !== 'undefined' && document.querySelector('.typed-text')) {
+    new Typed('.typed-text', {
+      strings: ['מקצועי', 'מודרני', 'מרשים', 'ייחודי'],
+      typeSpeed: 100,
+      backSpeed: 50,
+      loop: true,
+      backDelay: 2000
+    });
+  }
+  
+  // Particles.js Background
+  if (typeof particlesJS !== 'undefined' && document.getElementById('particles-js')) {
+    particlesJS('particles-js', {
+      particles: {
+        number: { value: 80, density: { enable: true, value_area: 800 } },
+        color: { value: '#6366f1' },
+        opacity: { value: 0.5, random: true },
+        size: { value: 3, random: true },
+        move: { enable: true, speed: 2, direction: 'none', out_mode: 'out' }
+      }
+    });
+  }
+  
+  // Vanilla Tilt on Cards
+  if (typeof VanillaTilt !== 'undefined') {
+    VanillaTilt.init(document.querySelectorAll('.tilt-card'), {
+      max: 10,
+      speed: 400,
+      glare: true,
+      'max-glare': 0.3
+    });
+  }
+  
+  // Scroll Progress Bar
+  window.addEventListener('scroll', () => {
+    const winScroll = document.documentElement.scrollTop;
+    const height = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+    const scrolled = (winScroll / height) * 100;
+    const progressBar = document.getElementById('scroll-progress');
+    if (progressBar) progressBar.style.width = scrolled + '%';
+  });
+  
+  // Dark Mode Toggle (if exists)
+  const darkModeToggle = document.getElementById('darkModeToggle');
+  if (darkModeToggle) {
+    darkModeToggle.addEventListener('click', () => {
+      document.documentElement.classList.toggle('dark');
+      localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
+    });
+    
+    if (localStorage.getItem('darkMode') === 'true') {
+      document.documentElement.classList.add('dark');
+    }
+  }
+  
+  // Lazy Loading Images
+  if ('IntersectionObserver' in window) {
+    const imageObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const img = entry.target;
+          img.src = img.dataset.src;
+          img.classList.add('loaded');
+          imageObserver.unobserve(img);
+        }
+      });
+    });
+    
+    document.querySelectorAll('img[data-src]').forEach(img => imageObserver.observe(img));
+  }
 </script>
 
-7. **תוכן עברי איכותי:**
-   - כתוב תוכן מקצועי בעברית
-   - לא "לורם איפסום"
-   - תוכן רלוונטי לנושא
+7️⃣ אלמנטים צפים חכמים:
+<!-- WhatsApp צף -->
+<a href__="https://wa.me/972501234567" target="_blank" class="fixed bottom-6 left-6 bg-gradient-to-br from-green-400 to-green-600 hover:from-green-500 hover:to-green-700 text-white w-16 h-16 rounded-full flex items-center justify-center shadow-2xl hover:shadow-green-500/50 transform hover:scale-110 transition-all duration-300 z-50 animate-bounce" style="animation-duration: 3s;">
+  <i class="fab fa-whatsapp text-3xl"></i>
+</a>
 
-8. **אלמנטים צפים:**
-   - WhatsApp: <a href__="https://wa.me/972501234567" class="fixed bottom-6 left-6 bg-green-500 hover:bg-green-600 text-white w-14 h-14 rounded-full flex items-center justify-center shadow-2xl z-50 transition"><i class="fab fa-whatsapp text-2xl"></i></a>
-   - גלילה למעלה: <button onclick="window.scrollTo({top:0,behavior:'smooth'})" class="fixed bottom-6 right-6 bg-blue-600 hover:bg-blue-700 text-white w-12 h-12 rounded-full flex items-center justify-center shadow-2xl z-50 transition"><i class="fas fa-arrow-up"></i></button>
+<!-- גלילה למעלה -->
+<button onclick="window.scrollTo({top:0,behavior:'smooth'})" class="fixed bottom-6 right-6 bg-gradient-to-br from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white w-14 h-14 rounded-full flex items-center justify-center shadow-2xl hover:shadow-blue-500/50 transform hover:scale-110 transition-all duration-300 z-50 opacity-0" id="scrollTopBtn">
+  <i class="fas fa-arrow-up text-xl"></i>
+</button>
 
-⛔ אסור:
-- להחזיר קוד חלקי
-- להשתמש בתמונות placeholder
-- לכתוב markdown
-- לתת הסברים
-- לדלג על ספריות
+<script>
+  window.addEventListener('scroll', () => {
+    const scrollBtn = document.getElementById('scrollTopBtn');
+    if (window.scrollY > 500) scrollBtn.style.opacity = '1';
+    else scrollBtn.style.opacity = '0';
+  });
+</script>
 
-✅ החזר רק:
-<!DOCTYPE html>
-<html dir="rtl" lang="he">
-...1500+ שורות קוד מלא...
-</html>
+8️⃣ תוכן עברי איכותי:
+   ✅ תוכן מקצועי ורלוונטי בעברית
+   ✅ כותרות מעניינות
+   ✅ תיאורים מפורטים
+   ⛔ אסור: לורם איפסום, טקסט גנרי
 
-אם מבקשים שינוי - שנה רק את המבוקש ושמור על כל השאר!`
+9️⃣ תוספות מפתיעות חובה:
+   ✅ Particles.js ברקע ה-Hero
+   ✅ GLightbox לגלריה עם zoom
+   ✅ Swiper carousel להמלצות
+   ✅ CountUp.js למספרים / סטטיסטיקות
+   ✅ Typed.js לאפקט כתיבה בכותרת
+   ✅ Vanilla Tilt לכרטיסים (3D effect)
+   ✅ Scroll Progress Bar בראש העמוד
+   ✅ Dark Mode Toggle
+   ✅ Lazy Loading לתמונות
+   ✅ שעון דיגיטלי חי בפוטר
+   ✅ טופס צור קשר עם validation מלא
+   ✅ Accordion אנימציות ל-FAQ
+   ✅ מונה מבקרים עם localStorage
+
+⛔⛔⛔ אסורים לחלוטין (תיפסל אם תעבור עליהם!):
+❌ להחזיר markdown (\\\`\\\`\\\`html או \\\`\\\`\\\`)
+❌ לכתוב הסברים או תיאורים
+❌ להשתמש ב-"..." או "הוסף עוד כאן"
+❌ לדלג על סקשנים או חלקים
+❌ תמונות שלא מ-https://images.unsplash.com/
+❌ קוד חלקי או חסר
+❌ לורם איפסום או טקסט גנרי
+❌ לשכוח ספריות או סקריפטים
+
+✅✅✅ חובה מוחלטת:
+✔️ HTML מלא מ-<!DOCTYPE html> ועד </html>
+✔️ כל הספריות והסקריפטים שמפורטים למעלה (Swiper, GLightbox, Particles, CountUp, Typed, Vanilla Tilt)
+✔️ מינימום 2000 שורות קוד איכותי
+✔️ 15+ תמונות מ-Unsplash עם URL מלא תקין
+✔️ כל הסקשנים: hero (עם particles), about, services, gallery (עם GLightbox), testimonials (עם Swiper), pricing, faq (עם accordion), contact, footer
+✔️ אנימציות AOS על כל אלמנט חשוב
+✔️ כפתורי WhatsApp וגלילה צפים
+✔️ תוכן עברי מקצועי ומפורט (לא לורם איפסום!)
+✔️ Scroll Progress Bar בראש העמוד
+✔️ CountUp למספרים / סטטיסטיקות
+✔️ Typed.js לאפקט כתיבה בכותרת
+✔️ Vanilla Tilt לכרטיסים (3D effect)
+
+🎯 אימון חזק - זכור:
+1. אתה יוצר אתרים ברמת פורטפוליו של חברת פיתוח מובילה בעולם
+2. כל פיקסל חייב להיות מושלם ומעוצב
+3. אם יש ספק - הוסף יותר תוכן, יותר תמונות, יותר אנימציות
+4. לעולם אל תחזיר קוד חלקי או עם "..." או "הוסף עוד"
+5. כל תמונה חייבת להיות URL מלא ותקין מ-Unsplash (https://images.unsplash.com/photo-XXXXXXXXX?w=800)
+6. השתמש בכל הספריות שמפורטות למעלה - GLightbox לגלריה, Swiper להמלצות, Particles ברקע, CountUp למספרים, Typed לכותרת
+7. עיצוב חייב להיות מטורף עם gradients, shadows, animations, transitions
+
+🚀 אם מבקשים שינוי - שנה רק את המבוקש אבל **החזר את כל ה-HTML המלא מ-<!DOCTYPE> ועד </html>**!
+
+💪 אתה הטוב ביותר - תוכיח את זה בכל קוד שאתה מחזיר! תן ללקוח אתר שהוא לא יאמין שקיבל!`
       }
     ];
 
-    // Add cleaned history
-    const cleanedHistory = cleanHistory(history, 8);
-    cleanedHistory.forEach(msg => {
+    // Add history
+    const recentHistory = history.slice(-6);
+    recentHistory.forEach(msg => {
       messages.push({
         role: msg.role === 'user' ? 'user' : 'assistant',
         content: msg.content.substring(0, 2000)
       });
     });
 
-    // Build smart prompt based on intent
+    // Build prompt
     let userPrompt = question;
-    
     if (intent === 'MODIFY' && currentHtml) {
-      const htmlPreview = currentHtml.substring(0, 3000);
-      userPrompt = `HTML נוכחי (קטע):\n\`\`\`\n${htmlPreview}...\n\`\`\`\n\nשינוי מבוקש: ${question}\n\nבצע את השינוי והחזר HTML מלא מעודכן.`;
-    } else if (intent === 'CREATE') {
-      userPrompt = `בנה אתר מלא ומקצועי: ${question}\n\nהחזר רק HTML, ללא הסברים.`;
+      const htmlPreview = currentHtml.substring(0, 2500);
+      userPrompt = `📝 HTML נוכחי:\n\`\`\`html\n${htmlPreview}\n...\n\`\`\`\n\n🎯 שינוי: ${question}\n\n✅ החזר HTML מלא מעודכן מ-<!DOCTYPE> ועד </html>.`;
+    } else {
+      userPrompt = `🚀 בנה אתר מקצועי ומרשים: ${question}\n\n✅ החזר רק HTML מלא, ללא markdown או הסברים.`;
     }
-
     messages.push({ role: "user", content: userPrompt });
 
-    // Call Groq API with retry logic
-    console.log(`🤖 Calling Groq API... (${messages.length} messages)`);
-    
+    console.log(`🤖 Calling Groq - Intent: ${intent}`);
+
+    // Call Groq with retry
     let response;
     let retries = 0;
-    const maxRetries = 3;
-    
+    const maxRetries = 4;
+
     while (retries < maxRetries) {
       try {
         response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -315,30 +406,27 @@ async function handleAIRequest(req, res) {
           body: JSON.stringify({
             model: "llama-3.3-70b-versatile",
             messages,
-            temperature: intent === 'MODIFY' ? 0.3 : 0.4,
-            max_tokens: 8000
+            temperature: intent === 'MODIFY' ? 0.2 : 0.35,
+            max_tokens: 8000,
+            top_p: 0.9
           })
         });
 
         if (response.status === 429) {
-          analytics.rateLimitHits++;
+          requestStats.rateLimited++;
           retries++;
-          const waitTime = Math.pow(2, retries) * 1000;
-          console.log(`⏳ Rate limited, waiting ${waitTime}ms before retry ${retries}/${maxRetries}`);
+          const waitTime = Math.pow(2, retries) * 1500;
+          console.log(`⏳ Rate limited, retry ${retries}/${maxRetries}, waiting ${waitTime}ms`);
           await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
         }
 
         if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`❌ Groq error: ${response.status}`);
-          analytics.failedBuilds++;
+          requestStats.failed++;
           return res.json({ 
             success: false, 
             error: `שגיאת API: ${response.status}`,
-            userMessage: response.status === 429 
-              ? '⏳ השרת עמוס, נסה שוב בעוד כמה שניות'
-              : 'שגיאה בתקשורת עם השרת'
+            userMessage: '⏳ השרת עמוס, נסה שוב'
           });
         }
 
@@ -346,122 +434,60 @@ async function handleAIRequest(req, res) {
       } catch (error) {
         retries++;
         if (retries >= maxRetries) throw error;
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 2500));
       }
     }
 
     const data = await response.json();
-    let answer = data.choices[0]?.message?.content;
+    const answer = data.choices[0]?.message?.content;
 
     if (!answer) {
-      analytics.failedBuilds++;
+      requestStats.failed++;
       return res.json({ success: false, error: "אין תשובה מה-AI" });
     }
 
-    // Extract and validate HTML if building
-    let extractedHtml = null;
-    if (intent === 'CREATE' || intent === 'MODIFY') {
-      extractedHtml = extractHTML(answer);
-      
-      if (extractedHtml) {
-        if (!extractedHtml.includes('tailwindcss')) {
-          extractedHtml = extractedHtml.replace('</head>', '  <script src="https://cdn.tailwindcss.com"></script>\n</head>');
-        }
-        if (!extractedHtml.includes('font-awesome')) {
-          extractedHtml = extractedHtml.replace('</head>', '  <link rel="stylesheet" href__="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">\n</head>');
-        }
-      }
+    // Suggestions
+    const suggestions = [];
+    if (intent === 'CREATE') {
+      suggestions.push(
+        "💡 רעיון: להוסיף אנימציות parallax מטורפות?",
+        "💡 רעיון: להוסיף מצב לילה/יום?",
+        "💡 רעיון: להוסיף ספירת מבקרים חיה?"
+      );
+    } else if (currentHtml) {
+      if (!currentHtml.includes('particles')) suggestions.push("💡 רעיון: להוסיף particles.js לרקע?");
+      if (!currentHtml.includes('lightbox')) suggestions.push("💡 רעיון: להוסיף lightbox לגלריה?");
     }
 
-    // Generate smart suggestions
-    const suggestions = generateSuggestions(intent, extractedHtml || currentHtml);
-
-    // Update session
-    session.history.push({ role: 'user', content: question });
-    session.history.push({ role: 'assistant', content: answer });
-    if (session.history.length > MAX_SESSION_SIZE) {
-      session.history = session.history.slice(-MAX_SESSION_SIZE);
-    }
-
-    // Update analytics
-    analytics.successfulBuilds++;
-    const responseTime = Date.now() - startTime;
-    analytics.averageResponseTime = 
-      (analytics.averageResponseTime * (analytics.totalRequests - 1) + responseTime) / analytics.totalRequests;
-
-    console.log(`✅ Success in ${responseTime}ms`);
+    requestStats.successful++;
+    console.log(`✅ Success! Stats: ${requestStats.successful}/${requestStats.total}`);
 
     res.json({ 
       success: true, 
       answer,
-      metadata: {
-        intent,
-        responseTime: responseTime + 'ms',
-        hasHtml: !!extractedHtml,
-        suggestions,
-        sessionId,
-        queuePosition: requestQueue.length
-      }
+      metadata: { intent, suggestions, stats: requestStats }
     });
 
-  } catch (err) {
-    analytics.failedBuilds++;
-    console.error("💥 FATAL ERROR:", err.message);
+  } catch (error) {
+    requestStats.failed++;
+    console.error("Error:", error);
     res.json({ 
       success: false, 
-      error: "שגיאת שרת פנימית", 
-      details: err.message,
-      userMessage: '❌ אופס! משהו השתבש. נסה שוב בעוד רגע'
+      error: "שגיאת שרת",
+      userMessage: '❌ אופס! נסה שוב'
     });
   }
-}
+});
 
-// Health check endpoint
+app.get("/", (req, res) => {
+  res.json({ status: "🚀 DDreams AI Server v4.0 Ultra", stats: requestStats });
+});
+
 app.get("/health", (req, res) => {
-  res.json({ 
-    status: "healthy", 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime() 
-  });
+  res.json({ status: "healthy", uptime: process.uptime() });
 });
 
-// Clear session endpoint
-app.post("/clear-session", (req, res) => {
-  const { sessionId = 'default' } = req.body;
-  sessions.delete(sessionId);
-  res.json({ success: true, message: "Session cleared" });
-});
-
-// Cleanup old sessions every hour
-setInterval(() => {
-  const now = Date.now();
-  const MAX_AGE = 3600000;
-  
-  for (const [id, session] of sessions.entries()) {
-    if (now - session.createdAt > MAX_AGE) {
-      sessions.delete(id);
-      console.log(`🧹 Cleaned session: ${id}`);
-    }
-  }
-}, 3600000);
-
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`
-╔═══════════════════════════════════════╗
-║  🚀 DDreams AI Server v3.0 ULTRA    ║
-║  Port: ${PORT}                          ║
-║  Status: 🟢 Online                   ║
-║  Features:                           ║
-║    ✅ Smart Intent Detection         ║
-║    ✅ Session Management             ║
-║    ✅ Auto Suggestions               ║
-║    ✅ Analytics Tracking             ║
-║    ✅ HTML Validation                ║
-║    ✅ Context Awareness              ║
-║    ✅ Rate Limit Protection          ║
-║    ✅ Queue System                   ║
-╚═══════════════════════════════════════╝
-  `);
+  console.log(`🚀 DDreams AI Server v4.0 Ultra running on port ${PORT}`);
 });
