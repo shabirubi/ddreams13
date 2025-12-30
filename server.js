@@ -1,18 +1,29 @@
 const express = require("express");
 const fetch = require("node-fetch");
+const cors = require("cors");
 
 const app = express();
+
+// מאפשר לפרונט לדבר עם השרת
+app.use(cors());
+
+// מאפשר לקבל JSON
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Health check
+// בדיקת חיים
 app.get("/", (req, res) => {
-  res.send("OK");
+  res.send("Server is running");
 });
 
+// נקודת ה-API הראשית
 app.post("/ask", async (req, res) => {
   try {
     const question = req.body.question;
+
+    if (!question) {
+      return res.status(400).json({ error: "Missing 'question' field" });
+    }
 
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -46,5 +57,5 @@ app.post("/ask", async (req, res) => {
   }
 });
 
+// הפעלת השרת
 app.listen(3000, () => console.log("Server running on port 3000"));
-
