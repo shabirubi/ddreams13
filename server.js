@@ -6,6 +6,95 @@ const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+app.get("/", (req, res) => {
+  res.json({ status: "Server is running" });
+});
+
+app.post("/ask", async (req, res) => {
+  try {
+    const { question } = req.body;
+
+    if (!question || !question.trim()) {
+      return res.json({ success: false, error: "No question provided" });
+    }
+
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      return res.json({ success: false, error: "API key not found" });
+    }
+
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          {
+            role: "system",
+            content: "You build complete HTML websites with Tailwind CSS. Return full HTML code from <!DOCTYPE html> to </html>. Use images from https://images.unsplash.com/"
+          },
+          {
+            role: "user",
+            content: question
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 8000
+      })
+    });
+
+    if (!response.ok) {
+      return res.json({ 
+        success: false, 
+        error: `API error: ${response.status}` 
+      });
+    }
+
+    const data = await response.json();
+    const answer = data.choices?.[0]?.message?.content;
+
+    if (!answer) {
+      return res.json({ 
+        success: false, 
+        error: "No response from AI" 
+      });
+    }
+
+    return res.json({ 
+      success: true, 
+      answer: answer 
+    });
+
+  } catch (error) {
+    return res.json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+
+
+
+
+
+const express = require("express");
+const fetch = require("node-fetch");
+const cors = require("cors");
+
+const app = express();
+
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Advanced rate limiter
@@ -491,3 +580,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 DDreams AI Server v4.0 Ultra running on port ${PORT}`);
 });
+
